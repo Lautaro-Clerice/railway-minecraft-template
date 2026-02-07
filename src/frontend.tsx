@@ -154,11 +154,6 @@ function App() {
     return entries.filter((entry) => entry.name.toLowerCase().includes(q));
   }, [entries, query]);
 
-  const displayDataPath = useMemo(() => {
-    if (currentPath === "/") return "/data";
-    return `/data${currentPath}`;
-  }, [currentPath]);
-
   useEffect(() => {
     void fetchEntries("/");
   }, []);
@@ -598,32 +593,6 @@ function App() {
     return "—";
   }, [serverStatus, onlinePlayers]);
 
-  const statusTimestamp = useMemo(() => {
-    if (!serverStatusMeta?.fetchedAt) return "unknown";
-    const seconds = Math.max(
-      0,
-      Math.round((Date.now() - serverStatusMeta.fetchedAt) / 1000),
-    );
-    if (seconds < 10) return "just now";
-    if (seconds < 60) return `${seconds}s ago`;
-    const minutes = Math.round(seconds / 60);
-    return `${minutes}m ago`;
-  }, [serverStatusMeta?.fetchedAt]);
-
-  const onlineAgeLabel = useMemo(() => {
-    if (!onlinePlayersUpdatedAt) return "unknown";
-    const seconds = Math.max(0, Math.round((Date.now() - onlinePlayersUpdatedAt) / 1000));
-    if (seconds < 10) return "just now";
-    if (seconds < 60) return `${seconds}s ago`;
-    const minutes = Math.round(seconds / 60);
-    return `${minutes}m ago`;
-  }, [onlinePlayersUpdatedAt]);
-
-  const onlineMetaLabel = useMemo(() => {
-    if (serverStatus) return statusTimestamp;
-    return onlineAgeLabel;
-  }, [serverStatus, statusTimestamp, onlineAgeLabel]);
-
   return (
     <div className="min-h-screen dash-bg text-foreground">
       <div className="dash-shell dash-appear">
@@ -636,15 +605,6 @@ function App() {
               and send console commands. Press <kbd className="dash-key">/</kbd> to
               search files.
             </p>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="dash-chip">
-              <span className={dotClass} />
-              {logStatus === "connected" ? "streaming" : logStatus}
-            </span>
-            <span className="dash-chip">auth: mock</span>
-            <span className="dash-chip">{displayDataPath}</span>
           </div>
         </header>
 
@@ -683,11 +643,7 @@ function App() {
                 <div className="flex flex-wrap items-center justify-end gap-2">
                   <span className="dash-chip">
                     <span className={dotClass} />
-                    {serverStatusMeta?.stale
-                      ? "stale"
-                      : serverStatus
-                        ? "online"
-                        : "unknown"}
+                    {serverStatus ? "online" : "unknown"}
                   </span>
                   <span className="dash-chip">players: {playerCountLabel}</span>
                   {serverStatus?.publicAddress ? (
@@ -717,29 +673,21 @@ function App() {
               <section className="dash-surface lg:col-span-8" aria-label="Server snapshot">
                 <div className="dash-panelhead">
                   <div className="dash-paneltitle">Server snapshot</div>
-                  <span className="dash-chip">
-                    <span className={dotClass} />
-                    {logStatus === "connected" ? "live" : logStatus}
-                  </span>
                 </div>
 
                 <div className="dash-bodypad space-y-4">
                   <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                     <div className="rounded-2xl border border-border/70 bg-background/30 px-4 py-3">
-                      <div className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                      <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
                         Status
                       </div>
                       <div className="mt-1 text-sm text-foreground/95">
-                        {serverStatusMeta?.stale
-                          ? "stale"
-                          : serverStatus
-                            ? "online"
-                            : "unknown"}
+                        {serverStatus ? "online" : "unknown"}
                       </div>
                     </div>
 
                     <div className="rounded-2xl border border-border/70 bg-background/30 px-4 py-3">
-                      <div className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                      <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
                         Address
                       </div>
                       <div className="mt-1 truncate text-sm text-foreground/95">
@@ -748,7 +696,7 @@ function App() {
                     </div>
 
                     <div className="rounded-2xl border border-border/70 bg-background/30 px-4 py-3">
-                      <div className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                      <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
                         Version
                       </div>
                       <div className="mt-1 text-sm text-foreground/95">
@@ -757,7 +705,7 @@ function App() {
                     </div>
 
                     <div className="rounded-2xl border border-border/70 bg-background/30 px-4 py-3">
-                      <div className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+                      <div className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
                         Players
                       </div>
                       <div className="mt-1 text-sm text-foreground/95">
@@ -785,10 +733,6 @@ function App() {
                     <span className="dash-chip">{playerCountLabel}</span>
                   </div>
                   <div className="flex flex-wrap items-center justify-end gap-2">
-                    <span className="dash-chip">
-                      <span className={dotClass} />
-                      {onlineMetaLabel}
-                    </span>
                     <Button
                       variant="outline"
                       size="sm"
