@@ -48,33 +48,6 @@ const formatTimestamp = (value: string) =>
     timeStyle: "short",
   }).format(new Date(value));
 
-const uniq = <T,>(items: T[]) => Array.from(new Set(items));
-
-const extractPlayersFromLogLine = (raw: string) => {
-  // Common Minecraft outputs:
-  // - "There are 1 of a max of 20 players online: Steve"
-  // - "There are 0 of a max of 20 players online:"
-  // - "Players online: Steve, Alex"
-  const line = raw.replace(/\u001b\[[0-9;]*m/g, "").trim();
-  const matchSummary = line.match(
-    /there are\s+\d+\s+of a max of\s+\d+\s+players online:?\s*(.*)$/i,
-  );
-  const matchOnline = line.match(/players online:\s*(.*)$/i);
-  const matchThereAre = matchOnline ?? line.match(/online:\s*(.*)$/i);
-  const hasMatch = Boolean(matchSummary || matchThereAre);
-  if (!hasMatch) return null;
-  const payload = (matchSummary?.[1] ?? matchThereAre?.[1] ?? "").trim();
-  if (!payload) return [];
-
-  const candidates = payload
-    .split(",")
-    .map((v) => v.trim())
-    .filter(Boolean)
-    .map((v) => v.replace(/[^\w.-]/g, ""));
-
-  const players = uniq(candidates).filter(Boolean).slice(0, 24);
-  return players.length ? players : [];
-};
 
 const root = document.getElementById("root");
 
@@ -104,10 +77,6 @@ function App() {
   const [consoleError, setConsoleError] = useState<string | null>(null);
   const [logStatus, setLogStatus] = useState<"connecting" | "connected" | "error">(
     "connecting",
-  );
-  const [onlinePlayers, setOnlinePlayers] = useState<string[]>([]);
-  const [onlinePlayersUpdatedAt, setOnlinePlayersUpdatedAt] = useState<number | null>(
-    null,
   );
   const [serverStatus, setServerStatus] = useState<{
     host: string;
@@ -289,12 +258,6 @@ function App() {
       ws.onmessage = (event) => {
         const line = typeof event.data === "string" ? event.data : "";
         writeLogLine(line);
-
-        const players = extractPlayersFromLogLine(line);
-        if (players) {
-          setOnlinePlayers(players);
-          setOnlinePlayersUpdatedAt(Date.now());
-        }
       };
 
       ws.onerror = () => {
@@ -594,18 +557,16 @@ function App() {
   const runPlayers = () => runMacro("list");
 
   const playerList = useMemo(() => {
-    const statusSample = serverStatus?.players.sample ?? [];
-    if (statusSample.length) return statusSample;
-    return onlinePlayers;
-  }, [serverStatus, onlinePlayers]);
+    if (serverStatus) return serverStatus.players.sample ?? [];
+    return [];
+  }, [serverStatus]);
 
   const playerCountLabel = useMemo(() => {
     if (serverStatus) {
       return `${serverStatus.players.online}/${serverStatus.players.max}`;
     }
-    if (onlinePlayers.length) return `${onlinePlayers.length} online`;
     return "—";
-  }, [serverStatus, onlinePlayers]);
+  }, [serverStatus]);
 
   return (
     <div className="min-h-screen dash-bg text-foreground">
