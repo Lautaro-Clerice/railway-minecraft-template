@@ -4,34 +4,16 @@ import path from "node:path";
 import index from "./index.html";
 import mc from "minecraftstatuspinger";
 import type { ServerWebSocket } from "bun";
+import { env } from "./env";
 
-const FILES_ROOT = path.resolve(Bun.env.FILES_ROOT ?? "/data");
 const MAX_PREVIEW_BYTES = 200_000;
 const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;
-const CONSOLE_PIPE = Bun.env.MC_CONSOLE_PIPE ?? "/tmp/minecraft-console-in";
-const LOG_PATH = Bun.env.MC_LOG_PATH ?? "/data/logs/latest.log";
-const LOG_TAIL_BYTES = Number.parseInt(Bun.env.MC_LOG_TAIL_BYTES ?? "20000", 10);
-const LOG_POLL_MS = Number.parseInt(Bun.env.MC_LOG_POLL_MS ?? "1000", 10);
-const MC_SERVER_HOST = Bun.env.MC_SERVER_HOST ?? "127.0.0.1";
-const MC_SERVER_PORT = Number.parseInt(
-  Bun.env.MC_SERVER_PORT ?? Bun.env.SERVER_PORT ?? "25565",
-  10,
-);
-const MC_SERVER_PORT_SAFE = Number.isNaN(MC_SERVER_PORT) ? 25565 : MC_SERVER_PORT;
-const MC_STATUS_CACHE_MS = Number.parseInt(
-  Bun.env.MC_STATUS_CACHE_MS ?? "8000",
-  10,
-);
-const MC_STATUS_CACHE_MS_SAFE = Number.isNaN(MC_STATUS_CACHE_MS)
-  ? 8000
-  : Math.max(1000, MC_STATUS_CACHE_MS);
-const RAILWAY_TCP_PROXY_DOMAIN = Bun.env.RAILWAY_TCP_PROXY_DOMAIN ?? "";
-const RAILWAY_TCP_PROXY_PORT = Bun.env.RAILWAY_TCP_PROXY_PORT ?? "";
-const CONTROL_PORT = Number.parseInt(
-  Bun.env.CONTROL_PORT ?? Bun.env.APP_PORT ?? "3000",
-  10,
-);
-const CONTROL_PORT_SAFE = Number.isNaN(CONTROL_PORT) ? 3000 : CONTROL_PORT;
+const FILES_ROOT = path.resolve("/data");
+const CONSOLE_PIPE = "/tmp/minecraft-console-in";
+const LOG_PATH = "/data/logs/latest.log";
+const LOG_TAIL_BYTES = 20_000;
+const LOG_POLL_MS = 1000;
+const MC_STATUS_CACHE_MS = 8000;
 
 const json = (data: unknown, init: ResponseInit = {}) =>
   new Response(JSON.stringify(data), {
@@ -53,17 +35,33 @@ const normalizeConsoleCommand = (command: string) =>
   command.replace(/\r?\n/g, " ").trim();
 
 const getLogTailBytes = (value: string | null) => {
-  if (!value) return Number.isNaN(LOG_TAIL_BYTES) ? 20_000 : LOG_TAIL_BYTES;
+  if (!value) return LOG_TAIL_BYTES;
   const parsed = Number.parseInt(value, 10);
-  if (Number.isNaN(parsed)) return Number.isNaN(LOG_TAIL_BYTES) ? 20_000 : LOG_TAIL_BYTES;
+  if (Number.isNaN(parsed)) return LOG_TAIL_BYTES;
   return Math.max(0, parsed);
 };
 
 const getLogPollMs = (value: string | null) => {
-  if (!value) return Number.isNaN(LOG_POLL_MS) ? 1000 : LOG_POLL_MS;
+  if (!value) return LOG_POLL_MS;
   const parsed = Number.parseInt(value, 10);
-  if (Number.isNaN(parsed)) return Number.isNaN(LOG_POLL_MS) ? 1000 : LOG_POLL_MS;
+  if (Number.isNaN(parsed)) return LOG_POLL_MS;
   return Math.max(250, parsed);
+};
+
+const getMCServerPort = () => {
+  const port = Number.parseInt(
+    env.MC_SERVER_PORT ?? env.SERVER_PORT ?? "25565",
+    10,
+  );
+  return Number.isNaN(port) ? 25565 : port;
+};
+
+const getControlPort = () => {
+  const port = Number.parseInt(
+    env.CONTROL_PORT ?? env.APP_PORT ?? "3000",
+    10,
+  );
+  return Number.isNaN(port) ? 3000 : port;
 };
 
 type ConsoleLogSocketData = {
@@ -90,11 +88,11 @@ type StatusSnapshot = {
 };
 
 const createBaseStatusSnapshot = (): StatusSnapshot => ({
-  host: MC_SERVER_HOST,
-  port: MC_SERVER_PORT_SAFE,
+  host: env.MC_SERVER_HOST,
+  port: getMCServerPort(),
   publicAddress:
-    RAILWAY_TCP_PROXY_DOMAIN && RAILWAY_TCP_PROXY_PORT
-      ? `${RAILWAY_TCP_PROXY_DOMAIN}:${RAILWAY_TCP_PROXY_PORT}`
+    env.RAILWAY_TCP_PROXY_DOMAIN && env.RAILWAY_TCP_PROXY_PORT
+      ? `${env.RAILWAY_TCP_PROXY_DOMAIN}:${env.RAILWAY_TCP_PROXY_PORT}`
       : null,
   motd: null,
   version: null,
@@ -163,7 +161,7 @@ const readLogTail = async (bytes = 25_000) => {
 
 const fetchServerStatus = async () => {
   const now = Date.now();
-  if (statusCache && now - statusCache.fetchedAt < MC_STATUS_CACHE_MS_SAFE) {
+  if (statusCache && now - statusCache.fetchedAt < MC_STATUS_CACHE_MS) {
     return statusCache.data;
   }
   if (statusInFlight) return statusInFlight;
@@ -173,8 +171,8 @@ const fetchServerStatus = async () => {
 
     try {
       const res = await mc.lookup({
-        host: MC_SERVER_HOST,
-        port: MC_SERVER_PORT_SAFE,
+        host: env.MC_SERVER_HOST,
+        port: getMCServerPort(),
         timeout: 2500,
         ping: true,
         SRVLookup: true,
@@ -328,7 +326,7 @@ const ensureAuth = () => {
 };
 
 const server = Bun.serve({
-  port: CONTROL_PORT_SAFE,
+  port: getControlPort(),
   maxRequestBodySize: MAX_UPLOAD_BYTES,
   routes: {
     "/api/files": {
@@ -498,7 +496,7 @@ const server = Bun.serve({
             return json({ error: "Command is required." }, { status: 400 });
           }
 
-          if (!isTruthy(Bun.env.CREATE_CONSOLE_IN_PIPE)) {
+          if (!isTruthy(env.CREATE_CONSOLE_IN_PIPE)) {
             return json(
               {
                 error:
@@ -539,7 +537,7 @@ const server = Bun.serve({
           const data = await fetchServerStatus();
           const cached =
             statusCache &&
-            Date.now() - statusCache.fetchedAt < MC_STATUS_CACHE_MS_SAFE + 250;
+            Date.now() - statusCache.fetchedAt < MC_STATUS_CACHE_MS + 250;
           return json({
             ok: true,
             data,
