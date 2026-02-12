@@ -595,7 +595,7 @@ const toBase64Url = (input: Uint8Array) =>
 		.replace(/=+$/g, "");
 
 const buildRailwayRedirectUri = () =>
-	`http://${env.RAILWAY_PUBLIC_DOMAIN}/api/auth/callback`;
+	`https://${env.RAILWAY_PUBLIC_DOMAIN}/api/auth/callback`;
 
 const createCodeVerifier = () => toBase64Url(randomBytes(64));
 
