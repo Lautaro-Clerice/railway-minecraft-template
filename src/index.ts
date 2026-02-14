@@ -1,9 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
-import { watch } from "node:fs";
+import { watch, type Stats } from "node:fs";
 import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import type { ServerWebSocket } from "bun";
 import mc from "minecraftstatuspinger";
+import { z } from "zod";
 import { env } from "./env";
 import index from "./index.html";
 
@@ -14,6 +15,7 @@ const CONSOLE_PIPE = "/tmp/minecraft-console-in";
 const LOG_PATH = "/data/logs/latest.log";
 const LOG_TAIL_BYTES = 20_000;
 const LOG_POLL_MS = 1000;
+const WS_AUTH_REVALIDATE_MS = 30_000;
 const MC_STATUS_CACHE_MS = 8000;
 const RAILWAY_GRAPHQL_ENDPOINT = "https://backboard.railway.com/graphql/v2";
 const RAILWAY_OAUTH_ME_ENDPOINT = "https://backboard.railway.com/oauth/me";
@@ -73,6 +75,62 @@ type RailwayUserProfile = {
 	email: string | null;
 	picture: string | null;
 };
+
+const persistedRailwayOAuthClientSchema = z.object({
+	clientId: z.string().min(1),
+	clientSecret: z.string().optional(),
+	registrationAccessToken: z.string().optional(),
+	registrationClientUri: z.string().optional(),
+	redirectUri: z.string().min(1),
+	registeredAt: z.string().min(1),
+});
+
+const dynamicRegistrationResponseSchema = z.object({
+	client_id: z.string().min(1),
+	client_secret: z.string().optional(),
+	registration_access_token: z.string().optional(),
+	registration_client_uri: z.string().optional(),
+});
+
+const oauthMeResponseSchema = z.object({
+	sub: z.string().optional().nullable(),
+	name: z.string().optional().nullable(),
+	email: z.string().optional().nullable(),
+	picture: z.string().optional().nullable(),
+});
+
+const serviceAuthorizationResponseSchema = z.object({
+	data: z
+		.object({
+			service: z
+				.object({
+					id: z.string().min(1),
+					name: z.string().optional().nullable(),
+				})
+				.nullable(),
+		})
+		.optional(),
+	errors: z.array(z.unknown()).optional(),
+});
+
+const mcStatusPayloadSchema = z.object({
+	description: z.unknown().optional(),
+	motd: z.unknown().optional(),
+	version: z
+		.union([z.string(), z.object({ name: z.string().optional() })])
+		.optional()
+		.nullable(),
+	players: z
+		.object({
+			online: z.coerce.number().optional(),
+			max: z.coerce.number().optional(),
+			sample: z
+				.array(z.union([z.string(), z.object({ name: z.string().optional() })]))
+				.optional(),
+		})
+		.optional()
+		.nullable(),
+});
 
 const serviceAuthCache = new Map<
 	string,
@@ -150,14 +208,17 @@ const authorizeTokenForService = async (
 		return result;
 	}
 
-	const gqlErrors = payload && Array.isArray(payload.errors) ? payload.errors : null;
-	if (gqlErrors) {
+	const parsed = serviceAuthorizationResponseSchema.safeParse(payload ?? {});
+	const gqlErrors = parsed.success ? parsed.data.errors ?? null : null;
+	if (gqlErrors || !parsed.success) {
 		const result: ServiceAuthorizationResult = {
 			ok: false,
 			service: null,
 			status: 200,
-			error: "Railway GraphQL returned errors.",
-			details: gqlErrors,
+			error: parsed.success
+				? "Railway GraphQL returned errors."
+				: "Railway GraphQL payload validation failed.",
+			details: parsed.success ? gqlErrors : parsed.error.flatten(),
 		};
 		serviceAuthCache.set(accessToken, {
 			result,
@@ -165,26 +226,12 @@ const authorizeTokenForService = async (
 		});
 		return result;
 	}
-
-	const rawService =
-		payload &&
-		typeof payload.data === "object" &&
-		payload.data &&
-		"service" in payload.data
-			? (payload.data as Record<string, unknown>).service
-			: null;
-	const service =
-		rawService &&
-		typeof rawService === "object" &&
-		typeof (rawService as { id?: unknown }).id === "string"
-			? {
-					id: (rawService as { id: string }).id,
-					name:
-						typeof (rawService as { name?: unknown }).name === "string"
-							? (rawService as { name: string }).name
-							: null,
-				}
-			: null;
+	const service = parsed.data.data?.service
+		? {
+				id: parsed.data.data.service.id,
+				name: parsed.data.data.service.name ?? null,
+			}
+		: null;
 
 	const result: ServiceAuthorizationResult = {
 		ok: Boolean(service),
@@ -221,12 +268,13 @@ const fetchRailwayUserProfile = async (
 		} catch {
 			return null;
 		}
-
+		const parsed = oauthMeResponseSchema.safeParse(payload);
+		if (!parsed.success) return null;
 		return {
-			sub: typeof payload.sub === "string" ? payload.sub : null,
-			name: typeof payload.name === "string" ? payload.name : null,
-			email: typeof payload.email === "string" ? payload.email : null,
-			picture: typeof payload.picture === "string" ? payload.picture : null,
+			sub: parsed.data.sub ?? null,
+			name: parsed.data.name ?? null,
+			email: parsed.data.email ?? null,
+			picture: parsed.data.picture ?? null,
 		};
 	} catch {
 		return null;
@@ -239,6 +287,13 @@ const requireAuth = async (req: Request) => {
 
 	const auth = await authorizeTokenForService(accessToken);
 	return auth.ok;
+};
+
+const getValidatedAccessToken = async (req: Request) => {
+	const accessToken = readCookie(req, RAILWAY_AUTH_COOKIE_NAME);
+	if (!accessToken) return null;
+	const auth = await authorizeTokenForService(accessToken);
+	return auth.ok ? accessToken : null;
 };
 
 const isTruthy = (value: string | undefined) => {
@@ -283,6 +338,8 @@ type ConsoleLogSocketData = {
 	watcher: ReturnType<typeof watch> | null;
 	interval: ReturnType<typeof setInterval> | null;
 	pumping: boolean;
+	accessToken: string;
+	nextAuthCheckAt: number;
 };
 
 type StatusSnapshot = {
@@ -395,55 +452,38 @@ const fetchServerStatus = async () => {
 			if (!statusPayload) {
 				throw new Error("Server status unavailable");
 			}
+			const parsedStatusPayload = mcStatusPayloadSchema.safeParse(statusPayload);
+			if (!parsedStatusPayload.success) {
+				throw new Error("Server status payload invalid");
+			}
+			const typedPayload = parsedStatusPayload.data;
+			const version =
+				typeof typedPayload.version === "string"
+					? typedPayload.version
+					: typedPayload.version?.name ?? null;
+			const sample =
+				typedPayload.players?.sample
+					?.map((player) => (typeof player === "string" ? player : player.name))
+					.filter((value): value is string => Boolean(value)) ?? [];
+			const online = typedPayload.players?.online ?? 0;
+			const max = typedPayload.players?.max ?? 0;
 
 			const snapshot: StatusSnapshot = {
 				...baseSnapshot,
-				motd: normalizeMotd(statusPayload.description ?? statusPayload.motd),
-				version:
-					(statusPayload.version &&
-					typeof statusPayload.version === "object" &&
-					"name" in statusPayload.version
-						? (statusPayload.version as { name?: string }).name
-						: statusPayload.version) ?? null,
+				motd: normalizeMotd(typedPayload.description ?? typedPayload.motd),
+				version,
 				latency: typeof res.latency === "number" ? res.latency : null,
 				players: {
-					online:
-						(statusPayload.players &&
-						typeof statusPayload.players === "object" &&
-						"online" in statusPayload.players
-							? Number(
-									(statusPayload.players as { online?: number }).online ?? 0,
-								)
-							: 0) ?? 0,
-					max:
-						(statusPayload.players &&
-						typeof statusPayload.players === "object" &&
-						"max" in statusPayload.players
-							? Number((statusPayload.players as { max?: number }).max ?? 0)
-							: 0) ?? 0,
-					sample:
-						statusPayload.players &&
-						typeof statusPayload.players === "object" &&
-						Array.isArray(
-							(statusPayload.players as { sample?: unknown }).sample,
-						)
-							? (
-									statusPayload.players as {
-										sample?: Array<{ name?: string } | string>;
-									}
-								).sample
-									?.map((player) =>
-										typeof player === "string" ? player : player.name,
-									)
-									.filter((value): value is string => Boolean(value))
-							: [],
+					online,
+					max,
+					sample,
 				},
 			};
 
 			statusCache = { data: snapshot, fetchedAt: Date.now() };
 			statusInFlight = null;
 			return snapshot;
-		} catch (error) {
+		} catch {
 			let snapshot = { ...baseSnapshot };
 
 			// No protocol fallback available; rely on log-based version extraction.
@@ -486,7 +526,17 @@ const pumpLog = async (
 	if (ws.data.pumping) return;
 	ws.data.pumping = true;
 	try {
-		let info;
+		const now = Date.now();
+		if (now >= ws.data.nextAuthCheckAt) {
+			const auth = await authorizeTokenForService(ws.data.accessToken);
+			if (!auth.ok) {
+				ws.close(1008, "Unauthorized");
+				return;
+			}
+			ws.data.nextAuthCheckAt = now + WS_AUTH_REVALIDATE_MS;
+		}
+
+		let info: Stats;
 		try {
 			info = await stat(LOG_PATH);
 		} catch {
@@ -610,28 +660,15 @@ const prunePkceSessions = () => {
 };
 
 const parseRailwayOAuthClient = (value: unknown): RailwayOAuthClient | null => {
-	if (!value || typeof value !== "object") return null;
-	const raw = value as Record<string, unknown>;
-	if (typeof raw.clientId !== "string" || raw.clientId.length === 0)
-		return null;
-	if (typeof raw.redirectUri !== "string" || raw.redirectUri.length === 0)
-		return null;
-	if (typeof raw.registeredAt !== "string" || raw.registeredAt.length === 0)
-		return null;
+	const parsed = persistedRailwayOAuthClientSchema.safeParse(value);
+	if (!parsed.success) return null;
 	return {
-		clientId: raw.clientId,
-		clientSecret:
-			typeof raw.clientSecret === "string" ? raw.clientSecret : null,
-		registrationAccessToken:
-			typeof raw.registrationAccessToken === "string"
-				? raw.registrationAccessToken
-				: null,
-		registrationClientUri:
-			typeof raw.registrationClientUri === "string"
-				? raw.registrationClientUri
-				: null,
-		redirectUri: raw.redirectUri,
-		registeredAt: raw.registeredAt,
+		clientId: parsed.data.clientId,
+		clientSecret: parsed.data.clientSecret ?? null,
+		registrationAccessToken: parsed.data.registrationAccessToken ?? null,
+		registrationClientUri: parsed.data.registrationClientUri ?? null,
+		redirectUri: parsed.data.redirectUri,
+		registeredAt: parsed.data.registeredAt,
 	};
 };
 
@@ -685,27 +722,20 @@ const registerRailwayOAuthClient = async (): Promise<RailwayOAuthClient> => {
 	} catch {
 		throw new Error("Railway OAuth registration returned invalid JSON.");
 	}
-
-	const clientId =
-		typeof payload.client_id === "string" ? payload.client_id : null;
-	if (!clientId) {
+	const parsed = dynamicRegistrationResponseSchema.safeParse(payload);
+	if (!parsed.success) {
 		throw new Error(
-			"Railway OAuth registration response is missing client_id.",
+			`Railway OAuth registration response validation failed: ${parsed.error.issues
+				.map((issue) => issue.path.join("."))
+				.join(", ")}`,
 		);
 	}
 
 	const client: RailwayOAuthClient = {
-		clientId,
-		clientSecret:
-			typeof payload.client_secret === "string" ? payload.client_secret : null,
-		registrationAccessToken:
-			typeof payload.registration_access_token === "string"
-				? payload.registration_access_token
-				: null,
-		registrationClientUri:
-			typeof payload.registration_client_uri === "string"
-				? payload.registration_client_uri
-				: null,
+		clientId: parsed.data.client_id,
+		clientSecret: parsed.data.client_secret ?? null,
+		registrationAccessToken: parsed.data.registration_access_token ?? null,
+		registrationClientUri: parsed.data.registration_client_uri ?? null,
 		redirectUri,
 		registeredAt: new Date().toISOString(),
 	};
@@ -763,7 +793,7 @@ const getRailwayOAuthClient = async () => {
 	}
 };
 
-const server = Bun.serve({
+const server = Bun.serve<ConsoleLogSocketData>({
 	port: getControlPort(),
 	maxRequestBodySize: MAX_UPLOAD_BYTES,
 	routes: {
@@ -792,7 +822,7 @@ const server = Bun.serve({
 			},
 		},
 		"/api/auth/callback": {
-			GET: async (req) => {
+			GET: async (req: Request) => {
 				const url = new URL(req.url);
 				const wantsJson = url.searchParams.get("json") === "1";
 				const code = url.searchParams.get("code");
@@ -960,7 +990,7 @@ const server = Bun.serve({
 			},
 		},
 		"/api/auth/me": {
-			GET: async (req) => {
+			GET: async (req: Request) => {
 				const authError = await ensureAuth(req);
 				if (authError) return authError;
 				const accessToken = readCookie(req, RAILWAY_AUTH_COOKIE_NAME);
@@ -968,7 +998,7 @@ const server = Bun.serve({
 					? await fetchRailwayUserProfile(accessToken)
 					: null;
 				const fallbackNameFromEmail =
-					profile?.email && profile.email.includes("@")
+					profile?.email?.includes("@")
 						? profile.email.split("@")[0]
 						: null;
 				const fallbackNameFromSub =
@@ -992,18 +1022,32 @@ const server = Bun.serve({
 			},
 		},
 		"/api/auth/logout": {
-			POST: async () =>
-				json(
+			POST: async (req: Request) => {
+				const accessToken = await getValidatedAccessToken(req);
+				if (!accessToken) {
+					return json(
+						{ error: "Unauthorized." },
+						{
+							status: 401,
+							headers: {
+								"Set-Cookie": clearAuthCookie(),
+							},
+						},
+					);
+				}
+
+				return json(
 					{ ok: true },
 					{
 						headers: {
 							"Set-Cookie": clearAuthCookie(),
 						},
 					},
-				),
+				);
+			},
 		},
 		"/api/files": {
-			GET: async (req) => {
+			GET: async (req: Request) => {
 				const authError = await ensureAuth(req);
 				if (authError) return authError;
 
@@ -1047,7 +1091,7 @@ const server = Bun.serve({
 					);
 				}
 			},
-			DELETE: async (req) => {
+			DELETE: async (req: Request) => {
 				const authError = await ensureAuth(req);
 				if (authError) return authError;
 
@@ -1079,7 +1123,7 @@ const server = Bun.serve({
 			},
 		},
 		"/api/files/content": {
-			GET: async (req) => {
+			GET: async (req: Request) => {
 				const authError = await ensureAuth(req);
 				if (authError) return authError;
 
@@ -1126,15 +1170,13 @@ const server = Bun.serve({
 			},
 		},
 		"/api/files/upload": {
-			POST: async (req) => {
+			POST: async (req: Request) => {
 				const authError = await ensureAuth(req);
 				if (authError) return authError;
 
 				try {
 					const { searchParams } = new URL(req.url);
-					const { relative, resolved } = resolveSafePath(
-						searchParams.get("path"),
-					);
+					const { relative } = resolveSafePath(searchParams.get("path"));
 					const fileNameHeader = req.headers.get("x-file-name");
 					const safeName = path.basename(fileNameHeader || "upload.bin");
 					const destinationRelative = path.posix.join(relative, safeName);
@@ -1160,7 +1202,7 @@ const server = Bun.serve({
 			},
 		},
 		"/api/console": {
-			POST: async (req) => {
+			POST: async (req: Request) => {
 				const authError = await ensureAuth(req);
 				if (authError) return authError;
 
@@ -1206,7 +1248,7 @@ const server = Bun.serve({
 			},
 		},
 		"/api/server/status": {
-			GET: async (req) => {
+			GET: async (req: Request) => {
 				const authError = await ensureAuth(req);
 				if (authError) return authError;
 				try {
@@ -1245,9 +1287,11 @@ const server = Bun.serve({
 			},
 		},
 		"/api/console/ws": {
-			GET: async (req) => {
-				const authError = await ensureAuth(req);
-				if (authError) return authError;
+			GET: async (req: Request) => {
+				const accessToken = await getValidatedAccessToken(req);
+				if (!accessToken) {
+					return json({ error: "Unauthorized." }, { status: 401 });
+				}
 
 				const { searchParams } = new URL(req.url);
 				const tailBytes = getLogTailBytes(searchParams.get("tail"));
@@ -1260,6 +1304,8 @@ const server = Bun.serve({
 						watcher: null,
 						interval: null,
 						pumping: false,
+						accessToken,
+						nextAuthCheckAt: Date.now(),
 					} satisfies ConsoleLogSocketData,
 				});
 
@@ -1268,9 +1314,11 @@ const server = Bun.serve({
 			},
 		},
 		"/api/console/logs": {
-			GET: async (req) => {
-				const authError = await ensureAuth(req);
-				if (authError) return authError;
+			GET: async (req: Request) => {
+				const accessToken = await getValidatedAccessToken(req);
+				if (!accessToken) {
+					return json({ error: "Unauthorized." }, { status: 401 });
+				}
 
 				const { searchParams } = new URL(req.url);
 				const tailBytes = getLogTailBytes(searchParams.get("tail"));
@@ -1280,6 +1328,7 @@ const server = Bun.serve({
 				let position = 0;
 				let closed = false;
 				let interval: ReturnType<typeof setInterval> | null = null;
+				let nextAuthCheckAt = Date.now();
 
 				const stream = new ReadableStream({
 					start(controller) {
@@ -1296,7 +1345,18 @@ const server = Bun.serve({
 						const pump = async () => {
 							if (closed) return;
 							try {
-								let info;
+								const now = Date.now();
+								if (now >= nextAuthCheckAt) {
+									const auth = await authorizeTokenForService(accessToken);
+									if (!auth.ok) {
+										closed = true;
+										controller.close();
+										return;
+									}
+									nextAuthCheckAt = now + WS_AUTH_REVALIDATE_MS;
+								}
+
+								let info: Stats;
 								try {
 									info = await stat(LOG_PATH);
 								} catch {
@@ -1369,12 +1429,15 @@ const server = Bun.serve({
 		"/*": index,
 	},
 	websocket: {
-		open(ws) {
-			// Only the /api/console/ws route upgrades with our data shape.
-			const data = ws.data as ConsoleLogSocketData;
-			if (!data || typeof data.tailBytes !== "number") return;
+		open(ws: ServerWebSocket<ConsoleLogSocketData>) {
+			const data = ws.data;
+			if (typeof data.tailBytes !== "number") return;
+			if (!data.accessToken) {
+				ws.close(1008, "Unauthorized");
+				return;
+			}
 
-			void pumpLog(ws as ServerWebSocket<ConsoleLogSocketData>, {
+			void pumpLog(ws, {
 				resetToTail: true,
 			});
 
@@ -1383,7 +1446,7 @@ const server = Bun.serve({
 				data.watcher = watch(
 					LOG_PATH,
 					{ persistent: false },
-					() => void pumpLog(ws as ServerWebSocket<ConsoleLogSocketData>),
+					() => void pumpLog(ws),
 				);
 			} catch {
 				data.watcher = null;
@@ -1391,14 +1454,16 @@ const server = Bun.serve({
 
 			data.interval = setInterval(
 				() => {
-					void pumpLog(ws as ServerWebSocket<ConsoleLogSocketData>);
+					void pumpLog(ws);
 				},
 				Math.max(750, LOG_POLL_MS),
 			);
 		},
-		close(ws) {
-			const data = ws.data as ConsoleLogSocketData;
-			if (!data) return;
+		message() {
+			// No incoming websocket messages are handled for this route.
+		},
+		close(ws: ServerWebSocket<ConsoleLogSocketData>) {
+			const data = ws.data;
 			if (data.interval) clearInterval(data.interval);
 			data.interval = null;
 			if (data.watcher) data.watcher.close();
