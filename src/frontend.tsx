@@ -1172,8 +1172,8 @@ function App() {
 									</div>
 								) : null}
 
-								<ScrollArea className="h-[420px] pr-3">
-									<div className="flex flex-col gap-2">
+							<ScrollArea type="always" className="h-[420px] pr-3">
+								<div className="flex flex-col gap-2">
 										{filteredEntries.length === 0 && !isLoading ? (
 											<div className="dash-mutedbox">
 												{entries.length === 0
