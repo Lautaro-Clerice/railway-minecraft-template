@@ -926,8 +926,8 @@ function App() {
 											onClick={runPlayers}
 											disabled={!terminalReady}
 										>
-											<Users className="h-4 w-4 opacity-80" />
-											Refresh players
+											<RefreshCw className="h-4 w-4 opacity-80" />
+											Refresh
 										</Button>
 									</div>
 								</div>
