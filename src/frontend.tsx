@@ -895,12 +895,6 @@ function App() {
 										<span className={dotClass} />
 										{serverStatus ? "online" : "unknown"}
 									</span>
-									<span className="dash-chip">players: {playerCountLabel}</span>
-									{serverStatus?.publicAddress ? (
-										<span className="dash-chip">
-											{serverStatus.publicAddress}
-										</span>
-									) : null}
 								</div>
 							</div>
 
