@@ -1433,7 +1433,7 @@ const server = Bun.serve<ConsoleLogSocketData>({
 				});
 			},
 		},
-		"/*": index,
+		"/": index,
 	},
 	websocket: {
 		open(ws: ServerWebSocket<ConsoleLogSocketData>) {
