@@ -866,9 +866,8 @@ function App() {
 				</nav>
 
 				<section
-					className="mt-6 grid gap-4"
+					className={cn("mt-6 grid gap-4", activeTab !== "console" && "hidden")}
 					aria-label="Console"
-					hidden={activeTab !== "console"}
 				>
 						<div className="dash-surface">
 							<div className="dash-panelhead">
@@ -1047,9 +1046,8 @@ function App() {
 						</div>
 					</section>
 					<section
-						className="dash-split"
+						className={cn("dash-split", activeTab !== "files" && "hidden")}
 						aria-label="Files"
-						hidden={activeTab !== "files"}
 					>
 						<div className="dash-surface">
 							<div className="dash-panelhead">
