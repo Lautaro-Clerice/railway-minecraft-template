@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { type Stats, watch } from "node:fs";
-import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ServerWebSocket } from "bun";
 import mc from "minecraftstatuspinger";
@@ -594,6 +595,131 @@ const resolveSafePath = (value: string | null) => {
 	return { relative, resolved };
 };
 
+const normalizeUploadRelativePath = (value: string) => {
+	const segments = value
+		.replaceAll("\\", "/")
+		.split("/")
+		.filter((segment) => segment.length > 0 && segment !== ".");
+	if (
+		segments.length === 0 ||
+		segments.some(
+			(segment) => segment === ".." || segment.includes("\0") || segment === "/",
+		)
+	) {
+		throw new Error("Invalid upload path.");
+	}
+	return segments.join("/");
+};
+
+const getArchiveType = (fileName: string): "zip" | "tar" | null => {
+	const lower = fileName.toLowerCase();
+	if (lower.endsWith(".zip")) return "zip";
+	if (
+		lower.endsWith(".tar") ||
+		lower.endsWith(".tgz") ||
+		lower.endsWith(".tar.gz")
+	) {
+		return "tar";
+	}
+	return null;
+};
+
+const runCommand = async (cmd: string[], missingToolMessage: string) => {
+	let process: ReturnType<typeof Bun.spawn>;
+	try {
+		process = Bun.spawn({
+			cmd,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+	} catch (error) {
+		if (error instanceof Error && error.message.includes("ENOENT")) {
+			throw new Error(missingToolMessage);
+		}
+		throw error;
+	}
+	const [exitCode, stderr] = await Promise.all([
+		process.exited,
+		typeof process.stderr === "number"
+			? Promise.resolve("")
+			: new Response(process.stderr).text(),
+	]);
+	if (exitCode !== 0) {
+		const details = stderr.trim();
+		throw new Error(
+			details
+				? `${missingToolMessage} ${details}`
+				: `${missingToolMessage} (exit code ${exitCode}).`,
+		);
+	}
+};
+
+const copyExtractedTree = async (sourceRoot: string, targetRelativeRoot: string) => {
+	let files = 0;
+	let directories = 0;
+
+	const walk = async (sourceDirectory: string, relativeDirectory: string) => {
+		const entries = await readdir(sourceDirectory, { withFileTypes: true });
+		for (const entry of entries) {
+			if (entry.isSymbolicLink()) {
+				// Skip symlinks to avoid linking outside /data.
+				continue;
+			}
+			const sourcePath = path.join(sourceDirectory, entry.name);
+			const relativePathNative = relativeDirectory
+				? path.join(relativeDirectory, entry.name)
+				: entry.name;
+			const relativePathPosix = relativePathNative.split(path.sep).join("/");
+			const destinationRelative = path.posix.join(
+				targetRelativeRoot,
+				relativePathPosix,
+			);
+			const { resolved: destination } = resolveSafePath(destinationRelative);
+
+			if (entry.isDirectory()) {
+				await mkdir(destination, { recursive: true });
+				directories += 1;
+				await walk(sourcePath, relativePathNative);
+				continue;
+			}
+
+			if (entry.isFile()) {
+				await mkdir(path.dirname(destination), { recursive: true });
+				await Bun.write(destination, Bun.file(sourcePath));
+				files += 1;
+			}
+		}
+	};
+
+	await walk(sourceRoot, "");
+	return { files, directories };
+};
+
+const extractArchiveToPath = async (
+	archivePath: string,
+	archiveType: "zip" | "tar",
+	targetRelativeRoot: string,
+) => {
+	const extractionDirectory = await mkdtemp(path.join(tmpdir(), "mc-extract-"));
+	try {
+		if (archiveType === "zip") {
+			await runCommand(
+				["unzip", "-oq", archivePath, "-d", extractionDirectory],
+				"Unable to extract ZIP archive. Ensure `unzip` is installed.",
+			);
+		} else {
+			await runCommand(
+				["tar", "-xf", archivePath, "-C", extractionDirectory],
+				"Unable to extract TAR archive. Ensure `tar` is installed.",
+			);
+		}
+
+		return await copyExtractedTree(extractionDirectory, targetRelativeRoot);
+	} finally {
+		await rm(extractionDirectory, { recursive: true, force: true });
+	}
+};
+
 const ensureAuth = async (req: Request) => {
 	if (!(await requireAuth(req))) {
 		return json({ error: "Unauthorized." }, { status: 401 });
@@ -1184,9 +1310,13 @@ const server = Bun.serve<ConsoleLogSocketData>({
 				try {
 					const { searchParams } = new URL(req.url);
 					const { relative } = resolveSafePath(searchParams.get("path"));
+					const shouldExtractArchive = searchParams.get("extract") === "1";
 					const fileNameHeader = req.headers.get("x-file-name");
-					const safeName = path.basename(fileNameHeader || "upload.bin");
-					const destinationRelative = path.posix.join(relative, safeName);
+					const relativePathHeader = req.headers.get("x-relative-path");
+					const uploadPath = relativePathHeader
+						? normalizeUploadRelativePath(relativePathHeader)
+						: path.basename(fileNameHeader || "upload.bin");
+					const destinationRelative = path.posix.join(relative, uploadPath);
 					const { resolved: destination } =
 						resolveSafePath(destinationRelative);
 
@@ -1195,6 +1325,42 @@ const server = Bun.serve<ConsoleLogSocketData>({
 					}
 
 					const response = new Response(req.body);
+					if (shouldExtractArchive) {
+						const archiveType = getArchiveType(uploadPath);
+						if (!archiveType) {
+							return json(
+								{
+									error:
+										"Unsupported archive. Use .zip, .tar, .tar.gz, or .tgz.",
+								},
+								{ status: 400 },
+							);
+						}
+						const uploadDirectory = await mkdtemp(
+							path.join(tmpdir(), "mc-upload-"),
+						);
+						try {
+							const archiveName = path.basename(uploadPath);
+							const archivePath = path.join(uploadDirectory, archiveName);
+							await Bun.write(archivePath, response);
+							const extracted = await extractArchiveToPath(
+								archivePath,
+								archiveType,
+								relative,
+							);
+							return json({
+								ok: true,
+								extracted: true,
+								path: relative,
+								files: extracted.files,
+								directories: extracted.directories,
+							});
+						} finally {
+							await rm(uploadDirectory, { recursive: true, force: true });
+						}
+					}
+
+					await mkdir(path.dirname(destination), { recursive: true });
 					await Bun.write(destination, response);
 
 					return json({ ok: true, path: destinationRelative });

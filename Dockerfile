@@ -15,6 +15,7 @@ FROM itzg/minecraft-server:latest
 ENV CONTROL_PORT=3000
 
 WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/server ./server
 COPY docker/start.sh /app/docker/start.sh
 

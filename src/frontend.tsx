@@ -231,6 +231,8 @@ function App() {
 	} | null>(null);
 
 	const fileInputRef = useRef<HTMLInputElement>(null);
+	const folderInputRef = useRef<HTMLInputElement>(null);
+	const archiveInputRef = useRef<HTMLInputElement>(null);
 	const terminalRef = useRef<HTMLDivElement>(null);
 	const terminalInstanceRef = useRef<Terminal | null>(null);
 	const fitAddonRef = useRef<FitAddon | null>(null);
@@ -612,50 +614,72 @@ function App() {
 		await fetchPreview(entry);
 	};
 
-	const handleUpload = async (file: File | null) => {
+	const uploadFile = async (
+		file: File,
+		options: {
+			relativePath?: string;
+			extractArchive?: boolean;
+			onProgress?: (uploadedBytes: number, totalBytes: number) => void;
+		} = {},
+	) => {
+		const uploadName = file.name || "upload.bin";
+		const params = new URLSearchParams({ path: currentPath });
+		if (options.extractArchive) {
+			params.set("extract", "1");
+		}
+		const uploadPath = `/api/files/upload?${params.toString()}`;
+		const totalBytes = Math.max(file.size, 1);
+		let uploadedBytes = 0;
+		const reader = file.stream().getReader();
+		const monitoredStream = new ReadableStream<Uint8Array>({
+			async pull(controller) {
+				const { done, value } = await reader.read();
+				if (done) {
+					options.onProgress?.(totalBytes, totalBytes);
+					controller.close();
+					return;
+				}
+				uploadedBytes += value.byteLength;
+				options.onProgress?.(uploadedBytes, totalBytes);
+				controller.enqueue(value);
+			},
+			cancel(reason) {
+				void reader.cancel(reason);
+			},
+		});
+		const res = await apiFetch(uploadPath, {
+			method: "POST",
+			headers: {
+				"Content-Type": file.type || "application/octet-stream",
+				"X-File-Name": uploadName,
+				...(options.relativePath
+					? { "X-Relative-Path": options.relativePath }
+					: {}),
+			},
+			body: monitoredStream,
+		});
+		const data = (await res.json().catch(() => ({}))) as { error?: string };
+		if (!res.ok) {
+			throw new Error(data.error ?? "Upload failed.");
+		}
+	};
+
+	const handleUploadSingleFile = async (file: File | null) => {
 		if (!file) return;
 		setUploading(true);
 		setUploadProgress(0);
 		setUploadName(file.name || "upload.bin");
 		setError(null);
 		try {
-			const uploadName = file.name || "upload.bin";
-			const uploadPath = `/api/files/upload?path=${encodeURIComponent(currentPath)}`;
-			const totalBytes = Math.max(file.size, 1);
-			let uploadedBytes = 0;
-			const reader = file.stream().getReader();
-			const monitoredStream = new ReadableStream<Uint8Array>({
-				async pull(controller) {
-					const { done, value } = await reader.read();
-					if (done) {
-						setUploadProgress(100);
-						controller.close();
-						return;
-					}
-					uploadedBytes += value.byteLength;
+			await uploadFile(file, {
+				onProgress: (uploadedBytes, totalBytes) => {
 					const percent = Math.min(
 						100,
 						Math.round((uploadedBytes / totalBytes) * 100),
 					);
 					setUploadProgress(percent);
-					controller.enqueue(value);
-				},
-				cancel(reason) {
-					void reader.cancel(reason);
 				},
 			});
-			const res = await apiFetch(uploadPath, {
-				method: "POST",
-				headers: {
-					"Content-Type": file.type || "application/octet-stream",
-					"X-File-Name": uploadName,
-				},
-				body: monitoredStream,
-			});
-			const data = (await res.json().catch(() => ({}))) as { error?: string };
-			if (!res.ok) {
-				throw new Error(data.error ?? "Upload failed.");
-			}
 			await fetchEntries(currentPath);
 		} catch (err) {
 			setError(err instanceof Error ? err.message : "Upload failed.");
@@ -667,6 +691,99 @@ function App() {
 				fileInputRef.current.value = "";
 			}
 		}
+	};
+
+	const handleUploadFolder = async (fileList: FileList | null) => {
+		const files = Array.from(fileList ?? []);
+		if (!files.length) return;
+		setUploading(true);
+		setUploadProgress(0);
+		setUploadName(`folder (${files.length} files)`);
+		setError(null);
+		try {
+			const totalBytes = Math.max(
+				files.reduce((sum, file) => sum + Math.max(file.size, 1), 0),
+				1,
+			);
+			let completedBytes = 0;
+
+			for (const file of files) {
+				const relativePath =
+					file.webkitRelativePath && file.webkitRelativePath.trim().length > 0
+						? file.webkitRelativePath
+						: file.name;
+				setUploadName(relativePath);
+				await uploadFile(file, {
+					relativePath,
+					onProgress: (uploadedBytes, currentFileTotal) => {
+						const percent = Math.min(
+							100,
+							Math.round(
+								((completedBytes + Math.min(uploadedBytes, currentFileTotal)) /
+									totalBytes) *
+									100,
+							),
+						);
+						setUploadProgress(percent);
+					},
+				});
+				completedBytes += Math.max(file.size, 1);
+				const percent = Math.min(
+					100,
+					Math.round((completedBytes / totalBytes) * 100),
+				);
+				setUploadProgress(percent);
+			}
+
+			await fetchEntries(currentPath);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : "Folder upload failed.");
+		} finally {
+			setUploading(false);
+			setUploadName(null);
+			setUploadProgress(0);
+			if (folderInputRef.current) {
+				folderInputRef.current.value = "";
+			}
+		}
+	};
+
+	const handleUploadArchive = async (file: File | null) => {
+		if (!file) return;
+		setUploading(true);
+		setUploadProgress(0);
+		setUploadName(file.name || "archive");
+		setError(null);
+		try {
+			await uploadFile(file, {
+				extractArchive: true,
+				onProgress: (uploadedBytes, totalBytes) => {
+					const percent = Math.min(
+						100,
+						Math.round((uploadedBytes / totalBytes) * 100),
+					);
+					setUploadProgress(percent);
+				},
+			});
+			await fetchEntries(currentPath);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : "Archive upload failed.");
+		} finally {
+			setUploading(false);
+			setUploadName(null);
+			setUploadProgress(0);
+			if (archiveInputRef.current) {
+				archiveInputRef.current.value = "";
+			}
+		}
+	};
+
+	const openFolderPicker = () => {
+		const input = folderInputRef.current;
+		if (!input) return;
+		input.setAttribute("webkitdirectory", "true");
+		input.setAttribute("directory", "true");
+		input.click();
 	};
 
 	const handleDelete = async () => {
@@ -1072,7 +1189,25 @@ function App() {
 										type="file"
 										className="hidden"
 										onChange={(event) =>
-											handleUpload(event.target.files?.[0] ?? null)
+											handleUploadSingleFile(event.target.files?.[0] ?? null)
+										}
+									/>
+									<input
+										ref={folderInputRef}
+										type="file"
+										multiple
+										className="hidden"
+										onChange={(event) =>
+											handleUploadFolder(event.target.files)
+										}
+									/>
+									<input
+										ref={archiveInputRef}
+										type="file"
+										accept=".zip,.tar,.tgz,.tar.gz,application/zip,application/x-tar,application/gzip,application/x-gzip"
+										className="hidden"
+										onChange={(event) =>
+											handleUploadArchive(event.target.files?.[0] ?? null)
 										}
 									/>
 
@@ -1084,7 +1219,29 @@ function App() {
 										disabled={uploading}
 									>
 										<Upload className="h-4 w-4 opacity-80" />
-										Upload
+										Upload file
+									</Button>
+
+									<Button
+										variant="outline"
+										size="sm"
+										className="h-9 rounded-full bg-background/40 px-4"
+										onClick={openFolderPicker}
+										disabled={uploading}
+									>
+										<Folder className="h-4 w-4 opacity-80" />
+										Upload folder
+									</Button>
+
+									<Button
+										variant="outline"
+										size="sm"
+										className="h-9 rounded-full bg-background/40 px-4"
+										onClick={() => archiveInputRef.current?.click()}
+										disabled={uploading}
+									>
+										<Upload className="h-4 w-4 opacity-80" />
+										Extract archive
 									</Button>
 
 									<Button
