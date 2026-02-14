@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { watch, type Stats } from "node:fs";
+import { type Stats, watch } from "node:fs";
 import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import type { ServerWebSocket } from "bun";
@@ -10,7 +10,7 @@ import index from "./index.html";
 
 const MAX_PREVIEW_BYTES = 200_000;
 const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;
-const FILES_ROOT = path.resolve("./data");
+const FILES_ROOT = path.resolve("/data");
 const CONSOLE_PIPE = "/tmp/minecraft-console-in";
 const LOG_PATH = "/data/logs/latest.log";
 const LOG_TAIL_BYTES = 20_000;
@@ -55,8 +55,7 @@ const redirectWithHeaders = (
 	new Response(null, {
 		status,
 		headers: {
-			Location:
-				typeof location === "string" ? location : location.toString(),
+			Location: typeof location === "string" ? location : location.toString(),
 			...headers,
 		},
 	});
@@ -209,7 +208,7 @@ const authorizeTokenForService = async (
 	}
 
 	const parsed = serviceAuthorizationResponseSchema.safeParse(payload ?? {});
-	const gqlErrors = parsed.success ? parsed.data.errors ?? null : null;
+	const gqlErrors = parsed.success ? (parsed.data.errors ?? null) : null;
 	if (gqlErrors || !parsed.success) {
 		const result: ServiceAuthorizationResult = {
 			ok: false,
@@ -452,7 +451,8 @@ const fetchServerStatus = async () => {
 			if (!statusPayload) {
 				throw new Error("Server status unavailable");
 			}
-			const parsedStatusPayload = mcStatusPayloadSchema.safeParse(statusPayload);
+			const parsedStatusPayload =
+				mcStatusPayloadSchema.safeParse(statusPayload);
 			if (!parsedStatusPayload.success) {
 				throw new Error("Server status payload invalid");
 			}
@@ -460,7 +460,7 @@ const fetchServerStatus = async () => {
 			const version =
 				typeof typedPayload.version === "string"
 					? typedPayload.version
-					: typedPayload.version?.name ?? null;
+					: (typedPayload.version?.name ?? null);
 			const sample =
 				typedPayload.players?.sample
 					?.map((player) => (typeof player === "string" ? player : player.name))
@@ -840,7 +840,10 @@ const server = Bun.serve<ConsoleLogSocketData>({
 				}
 				if (!state) {
 					if (wantsJson) {
-						return jsonPretty({ error: "Missing OAuth state." }, { status: 400 });
+						return jsonPretty(
+							{ error: "Missing OAuth state." },
+							{ status: 400 },
+						);
 					}
 					const redirectTo = new URL("/", req.url);
 					redirectTo.searchParams.set("auth_error", "Missing sign-in state.");
@@ -997,10 +1000,9 @@ const server = Bun.serve<ConsoleLogSocketData>({
 				const profile = accessToken
 					? await fetchRailwayUserProfile(accessToken)
 					: null;
-				const fallbackNameFromEmail =
-					profile?.email?.includes("@")
-						? profile.email.split("@")[0]
-						: null;
+				const fallbackNameFromEmail = profile?.email?.includes("@")
+					? profile.email.split("@")[0]
+					: null;
 				const fallbackNameFromSub =
 					profile?.sub && profile.sub.length > 0
 						? `user-${profile.sub.slice(0, 6)}`
@@ -1062,18 +1064,23 @@ const server = Bun.serve<ConsoleLogSocketData>({
 					}
 
 					const entries = await readdir(resolved, { withFileTypes: true });
+					const hiddenPaths = new Set([RAILWAY_OAUTH_CLIENT_CACHE_PATH]);
 					const items = await Promise.all(
-						entries.map(async (entry) => {
-							const fullPath = path.join(resolved, entry.name);
-							const info = await stat(fullPath);
-							return {
-								name: entry.name,
-								path: path.posix.join(relative, entry.name),
-								type: entry.isDirectory() ? "dir" : "file",
-								size: info.size,
-								mtime: info.mtime.toISOString(),
-							};
-						}),
+						entries
+							.filter(
+								(entry) => !hiddenPaths.has(path.join(resolved, entry.name)),
+							)
+							.map(async (entry) => {
+								const fullPath = path.join(resolved, entry.name);
+								const info = await stat(fullPath);
+								return {
+									name: entry.name,
+									path: path.posix.join(relative, entry.name),
+									type: entry.isDirectory() ? "dir" : "file",
+									size: info.size,
+									mtime: info.mtime.toISOString(),
+								};
+							}),
 					);
 
 					items.sort((a, b) => {
