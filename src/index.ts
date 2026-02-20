@@ -1213,9 +1213,9 @@ const server = Bun.serve<ConsoleLogSocketData>({
 						return json({ error: "Missing upload body." }, { status: 400 });
 					}
 
-					const response = new Response(req.body);
+					const bytes = new Uint8Array(await req.arrayBuffer());
 					await mkdir(path.dirname(destination), { recursive: true });
-					await Bun.write(destination, response);
+					await Bun.write(destination, bytes);
 
 					return json({ ok: true, path: destinationRelative });
 				} catch (error) {

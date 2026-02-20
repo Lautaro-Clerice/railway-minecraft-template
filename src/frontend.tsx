@@ -662,24 +662,7 @@ function App() {
 		const uploadName = file.name || "upload.bin";
 		const uploadPath = `/api/files/upload?path=${encodeURIComponent(currentPath)}`;
 		const totalBytes = Math.max(file.size, 1);
-		let uploadedBytes = 0;
-		const reader = file.stream().getReader();
-		const monitoredStream = new ReadableStream<Uint8Array>({
-			async pull(controller) {
-				const { done, value } = await reader.read();
-				if (done) {
-					options.onProgress?.(totalBytes, totalBytes);
-					controller.close();
-					return;
-				}
-				uploadedBytes += value.byteLength;
-				options.onProgress?.(uploadedBytes, totalBytes);
-				controller.enqueue(value);
-			},
-			cancel(reason) {
-				void reader.cancel(reason);
-			},
-		});
+		// Use a plain File body for maximum browser compatibility.
 		const res = await apiFetch(uploadPath, {
 			method: "POST",
 			headers: {
@@ -689,8 +672,9 @@ function App() {
 					? { "X-Relative-Path": options.relativePath }
 					: {}),
 			},
-			body: monitoredStream,
+			body: file,
 		});
+		options.onProgress?.(totalBytes, totalBytes);
 		const data = (await res.json().catch(() => ({}))) as { error?: string };
 		if (!res.ok) {
 			throw new Error(data.error ?? "Upload failed.");
