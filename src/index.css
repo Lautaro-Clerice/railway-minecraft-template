@@ -229,7 +229,7 @@
   }
 
   .dash-row {
-    @apply flex items-center justify-between gap-3 rounded-xl border px-4 py-3 transition;
+    @apply flex items-center justify-between gap-3 rounded-xl border px-3 py-2 transition;
     border-color: hsl(var(--border) / 0.85);
     background: hsl(var(--card));
   }

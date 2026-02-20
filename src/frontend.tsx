@@ -1252,8 +1252,8 @@ function App() {
 									</div>
 								) : null}
 
-							<ScrollArea type="always" className="h-[420px] pr-3">
-								<div className="flex flex-col gap-2">
+							<ScrollArea type="always" className="h-[560px] pr-3">
+								<div className="flex flex-col gap-1.5">
 										{filteredEntries.length === 0 && !isLoading ? (
 											<div className="dash-mutedbox">
 												{entries.length === 0
@@ -1297,7 +1297,7 @@ function App() {
 													<Button
 														variant="ghost"
 														size="icon"
-														className="h-9 w-9 rounded-full hover:bg-background/40"
+														className="h-8 w-8 rounded-full hover:bg-background/40"
 														onClick={() => setDeleteTarget(entry)}
 														aria-label={`Delete ${entry.name}`}
 													>
