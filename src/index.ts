@@ -98,6 +98,10 @@ const oauthMeResponseSchema = z.object({
 	picture: z.string().optional().nullable(),
 });
 
+const fileContentUpdateSchema = z.object({
+	content: z.string().max(MAX_PREVIEW_BYTES),
+});
+
 const serviceAuthorizationResponseSchema = z.object({
 	data: z
 		.object({
@@ -1186,6 +1190,41 @@ const server = Bun.serve<ConsoleLogSocketData>({
 					return json(
 						{
 							error: error instanceof Error ? error.message : "Preview failed.",
+						},
+						{ status: 400 },
+					);
+				}
+			},
+			PUT: async (req: Request) => {
+				const authError = await ensureAuth(req);
+				if (authError) return authError;
+
+				try {
+					const { searchParams } = new URL(req.url);
+					const { relative, resolved } = resolveSafePath(
+						searchParams.get("path"),
+					);
+					const info = await stat(resolved);
+
+					if (!info.isFile()) {
+						return json({ error: "Path is not a file." }, { status: 400 });
+					}
+
+					const body = (await req.json()) as unknown;
+					const parsed = fileContentUpdateSchema.safeParse(body);
+					if (!parsed.success) {
+						return json(
+							{ error: "Invalid file content payload." },
+							{ status: 400 },
+						);
+					}
+
+					await Bun.write(resolved, parsed.data.content);
+					return json({ ok: true, path: relative, content: parsed.data.content });
+				} catch (error) {
+					return json(
+						{
+							error: error instanceof Error ? error.message : "Save failed.",
 						},
 						{ status: 400 },
 					);

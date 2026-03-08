@@ -42,6 +42,7 @@ import {
 	CardTitle,
 } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
 type FileEntry = {
@@ -227,8 +228,12 @@ function App() {
 	const [error, setError] = useState<string | null>(null);
 	const [selected, setSelected] = useState<FileEntry | null>(null);
 	const [preview, setPreview] = useState<string>("");
+	const [draftPreview, setDraftPreview] = useState<string>("");
 	const [previewError, setPreviewError] = useState<string | null>(null);
 	const [previewLoading, setPreviewLoading] = useState(false);
+	const [previewSaving, setPreviewSaving] = useState(false);
+	const [saveError, setSaveError] = useState<string | null>(null);
+	const [saveMessage, setSaveMessage] = useState<string | null>(null);
 	const [deleteTarget, setDeleteTarget] = useState<FileEntry | null>(null);
 	const [uploading, setUploading] = useState(false);
 	const [uploadProgress, setUploadProgress] = useState(0);
@@ -324,6 +329,11 @@ function App() {
 		if (!q) return entries;
 		return entries.filter((entry) => entry.name.toLowerCase().includes(q));
 	}, [entries, query]);
+
+	const isPreviewDirty = useMemo(
+		() => selected?.type === "file" && draftPreview !== preview,
+		[draftPreview, preview, selected],
+	);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -599,7 +609,10 @@ function App() {
 		setError(null);
 		setSelected(null);
 		setPreview("");
+		setDraftPreview("");
 		setPreviewError(null);
+		setSaveError(null);
+		setSaveMessage(null);
 		setQuery("");
 		try {
 			const res = await apiFetch(`/api/files?path=${encodeURIComponent(path)}`);
@@ -623,7 +636,10 @@ function App() {
 
 	const fetchPreview = async (entry: FileEntry) => {
 		setPreview("");
+		setDraftPreview("");
 		setPreviewError(null);
+		setSaveError(null);
+		setSaveMessage(null);
 		setPreviewLoading(true);
 		try {
 			const res = await apiFetch(
@@ -633,7 +649,9 @@ function App() {
 			if (!res.ok) {
 				throw new Error(data.error ?? "Failed to load file.");
 			}
-			setPreview(data.content ?? "");
+			const nextContent = data.content ?? "";
+			setPreview(nextContent);
+			setDraftPreview(nextContent);
 		} catch (err) {
 			setPreviewError(
 				err instanceof Error ? err.message : "Failed to load file.",
@@ -650,6 +668,54 @@ function App() {
 		}
 		setSelected(entry);
 		await fetchPreview(entry);
+	};
+
+	const handleSavePreview = async () => {
+		if (!selected || selected.type !== "file" || !isPreviewDirty) return;
+		setPreviewSaving(true);
+		setSaveError(null);
+		setSaveMessage(null);
+		try {
+			const res = await apiFetch(
+				`/api/files/content?path=${encodeURIComponent(selected.path)}`,
+				{
+					method: "PUT",
+					headers: {
+						"Content-Type": "application/json",
+					},
+					body: JSON.stringify({ content: draftPreview }),
+				},
+			);
+			const data = (await res.json()) as {
+				ok?: boolean;
+				content?: string;
+				error?: string;
+			};
+			if (!res.ok) {
+				throw new Error(data.error ?? "Save failed.");
+			}
+			const nextContent = data.content ?? draftPreview;
+			setPreview(nextContent);
+			setDraftPreview(nextContent);
+			setSaveMessage("Saved.");
+			setEntries((currentEntries) =>
+				currentEntries.map((entry) =>
+					entry.path === selected.path
+						? { ...entry, mtime: new Date().toISOString(), size: nextContent.length }
+						: entry,
+				),
+			);
+		} catch (err) {
+			setSaveError(err instanceof Error ? err.message : "Save failed.");
+		} finally {
+			setPreviewSaving(false);
+		}
+	};
+
+	const handleResetPreview = () => {
+		setDraftPreview(preview);
+		setSaveError(null);
+		setSaveMessage(null);
 	};
 
 	const uploadFile = async (
@@ -1482,6 +1548,34 @@ function App() {
 								<div className="dash-paneltitle">Preview</div>
 								{selected ? (
 									<div className="flex items-center gap-2">
+										{selected.type === "file" ? (
+											<>
+												<Button
+													variant="outline"
+													size="sm"
+													className="h-9 rounded-full bg-background/40 px-4"
+													onClick={handleResetPreview}
+													disabled={!isPreviewDirty || previewSaving}
+												>
+													Reset
+												</Button>
+												<Button
+													size="sm"
+													className="h-9 rounded-full px-4"
+													onClick={() => {
+														void handleSavePreview();
+													}}
+													disabled={
+														previewLoading ||
+														previewSaving ||
+														Boolean(previewError) ||
+														!isPreviewDirty
+													}
+												>
+													{previewSaving ? "Saving..." : "Save"}
+												</Button>
+											</>
+										) : null}
 										<Button
 											variant="outline"
 											size="sm"
@@ -1524,11 +1618,31 @@ function App() {
 												{previewError}
 											</div>
 										) : (
-											<ScrollArea className="h-[420px] rounded-2xl border border-border/70 bg-background/30">
-												<pre className="whitespace-pre-wrap p-4 text-[12px] leading-relaxed text-foreground/90">
-													{preview || "No preview available."}
-												</pre>
-											</ScrollArea>
+											<div className="space-y-3">
+												{saveError ? (
+													<div className="dash-mutedbox text-destructive">
+														{saveError}
+													</div>
+												) : null}
+
+												{saveMessage ? (
+													<div className="dash-mutedbox text-foreground/90">
+														{saveMessage}
+													</div>
+												) : null}
+
+												<Textarea
+													value={draftPreview}
+													onChange={(event) => {
+														setDraftPreview(event.target.value);
+														setSaveError(null);
+														setSaveMessage(null);
+													}}
+													spellCheck={false}
+													className="h-[420px] resize-none rounded-2xl border-border/70 bg-background/30 font-mono text-[12px] leading-relaxed text-foreground/90"
+													placeholder="No preview available."
+												/>
+											</div>
 										)}
 									</>
 								) : (
