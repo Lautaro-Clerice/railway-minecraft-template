@@ -1048,7 +1048,7 @@ function App() {
 				<header className="dash-topbar">
 					<div>
 						<div className="dash-kicker">Minecraft Control</div>
-						<h1 className="dash-title">Server Operations</h1>
+						<h1 className="dash-title">KlericZ Server</h1>
 						<p className="dash-sub">
 							Manage files under{" "}
 							<span className="text-foreground/90">/data</span> and send console
